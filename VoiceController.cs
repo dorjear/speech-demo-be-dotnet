@@ -1,13 +1,11 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.CognitiveServices.Speech;
-using Microsoft.CognitiveServices.Speech.Audio;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
-using Xabe.FFmpeg;
+using System.Net.Http.Headers;
 
 [ApiController]
 [Route("api/[controller]")]
@@ -29,103 +27,39 @@ public class VoiceController : ControllerBase
     {
         if (file == null || file.Length == 0)
         {
-            _logger.LogError("No file uploaded.");
-            return BadRequest("No file uploaded.");
-        }
-
-        var webmFilePath = Path.Combine("uploads", Guid.NewGuid() + ".webm");
-        var wavFilePath = Path.ChangeExtension(webmFilePath, ".wav");
-
-        try
-        {
-            _logger.LogInformation("Saving webm file to {FilePath}", webmFilePath);
-
-            // Save the webm file
-            Directory.CreateDirectory("uploads"); // Ensure the directory exists
-            using (var stream = new FileStream(webmFilePath, FileMode.Create))
-            {
-                await file.CopyToAsync(stream);
-            }
-
-            _logger.LogInformation("Initializing FFmpeg");
-
-            // Set the path to ffmpeg executables
-            FFmpeg.SetExecutablesPath("/usr/local/bin"); // Update this path to the actual location of ffmpeg
-            _logger.LogInformation("Converting webm file to wav format");
-
-            // Convert webm to wav
-            var conversion = await FFmpeg.Conversions.New()
-                .AddParameter($"-i {webmFilePath} {wavFilePath}")
-                .Start();
-
-            _logger.LogInformation("Conversion completed. Transcribing audio");
-
-            // Transcribe the wav file
-            var result = await TranscribeAudioAsync(wavFilePath);
-            _logger.LogInformation("Transcription completed successfully");
-            return Ok(new { DisplayText = result });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "An error occurred while processing the file");
-            return StatusCode(500, $"Internal server error: {ex.Message}");
-        }
-        finally
-        {
-            // Clean up files
-            _logger.LogInformation("Cleaning up files");
-        }
-    }
-
-    private async Task<string> TranscribeAudioAsync(string wavFilePath)
-    {
-        var subscriptionKey = _configuration["Azure:SubscriptionKey"];
-        var region = _configuration["Azure:Region"];
-        var config = SpeechConfig.FromSubscription(subscriptionKey, region);
-
-        using var audioInput = AudioConfig.FromWavFileInput(wavFilePath);
-        using var recognizer = new SpeechRecognizer(config, audioInput);
-
-        var result = await recognizer.RecognizeOnceAsync();
-        if (result.Reason == ResultReason.RecognizedSpeech)
-        {
-            return result.Text;
-        }
-        else
-        {
-            throw new Exception($"Speech recognition failed. Reason: {result.Reason}");
-        }
-    }
-
-    [HttpGet("get-speech-token")]
-    public async Task<IActionResult> GetSpeechToken()
-    {
-        var speechKey = _configuration["Azure:SubscriptionKey"];
-        var speechRegion = _configuration["Azure:Region"];
-
-        if (string.IsNullOrEmpty(speechKey) || string.IsNullOrEmpty(speechRegion) ||
-            speechKey == "paste-your-speech-key-here" || speechRegion == "paste-your-speech-region-here")
-        {
-            return BadRequest("You forgot to add your speech key or region to the configuration.");
+            return BadRequest("File is not provided or empty.");
         }
 
         var client = _clientFactory.CreateClient();
-        client.DefaultRequestHeaders.Add("Ocp-Apim-Subscription-Key", speechKey);
+
+        var apiKey = _configuration["OpenAI:apiKey"];
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+        var content = new MultipartFormDataContent();
+
+        var fileContent = new StreamContent(file.OpenReadStream());
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("audio/webm");
+
+        var modelContent = new StringContent("whisper-1");
+        content.Add(modelContent, "model");
+        content.Add(fileContent, "file", file.FileName);
 
         try
         {
-            var response = await client.PostAsync(
-                $"https://{speechRegion}.api.cognitive.microsoft.com/sts/v1.0/issueToken",
-                null);
-
+            HttpResponseMessage response = await client.PostAsync("https://api.openai.com/v1/audio/transcriptions", content);
             response.EnsureSuccessStatusCode();
-            var token = await response.Content.ReadAsStringAsync();
 
-            return Ok(new { token, region = speechRegion });
+            string jsonResponse = await response.Content.ReadAsStringAsync();
+            _logger.LogInformation(jsonResponse);
+            return Ok(jsonResponse);
+
         }
-        catch (HttpRequestException)
+        catch (HttpRequestException ex)
         {
-            return Unauthorized("There was an error authorizing your speech key.");
+            // Print the error content if there is an HTTP request exception
+            _logger.LogError(ex, "An error occurred while processing the file");
+            throw;
         }
     }
+
 }
