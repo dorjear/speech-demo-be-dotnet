@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.CognitiveServices.Speech;
 using Microsoft.CognitiveServices.Speech.Audio;
+using Microsoft.CognitiveServices.Speech.Translation;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using System;
@@ -77,6 +78,59 @@ public class VoiceController : ControllerBase
         }
     }
 
+    [HttpPost("translate")]
+    public async Task<IActionResult> Translate([FromForm] IFormFile file)
+    {
+        if (file == null || file.Length == 0)
+        {
+            _logger.LogError("No file uploaded.");
+            return BadRequest("No file uploaded.");
+        }
+
+        var webmFilePath = Path.Combine("uploads", Guid.NewGuid() + ".webm");
+        var wavFilePath = Path.ChangeExtension(webmFilePath, ".wav");
+
+        try
+        {
+            _logger.LogInformation("Saving webm file to {FilePath}", webmFilePath);
+
+            // Save the webm file
+            Directory.CreateDirectory("uploads"); // Ensure the directory exists
+            using (var stream = new FileStream(webmFilePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            _logger.LogInformation("Initializing FFmpeg");
+
+            // Set the path to ffmpeg executables
+            FFmpeg.SetExecutablesPath("/usr/local/bin"); // Update this path to the actual location of ffmpeg
+            _logger.LogInformation("Converting webm file to wav format");
+
+            // Convert webm to wav
+            var conversion = await FFmpeg.Conversions.New()
+                .AddParameter($"-i {webmFilePath} {wavFilePath}")
+                .Start();
+
+            _logger.LogInformation("Conversion completed. Transcribing audio");
+
+            // Translate the wav file
+            var translatedText = await TranslateAudioAsync(wavFilePath, "zh-CN", "en"); // Translate from English to Spanish
+            _logger.LogInformation("Translation completed successfully");
+            return Ok(new { DisplayText = translatedText });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred while processing the file");
+            return StatusCode(500, $"Internal server error: {ex.Message}");
+        }
+        finally
+        {
+            // Clean up files
+            _logger.LogInformation("Cleaning up files");
+        }
+    }
+
     private async Task<string> TranscribeAudioAsync(string wavFilePath)
     {
         var subscriptionKey = _configuration["Azure:SubscriptionKey"];
@@ -94,6 +148,32 @@ public class VoiceController : ControllerBase
         else
         {
             throw new Exception($"Speech recognition failed. Reason: {result.Reason}");
+        }
+    }
+
+    private async Task<string> TranslateAudioAsync(string wavFilePath, string fromLanguage, string toLanguage)
+    {
+        var subscriptionKey = _configuration["Azure:SubscriptionKey"];
+        var region = _configuration["Azure:Region"];
+        var config = SpeechTranslationConfig.FromSubscription(subscriptionKey, region);
+        config.SpeechRecognitionLanguage = fromLanguage;
+        config.AddTargetLanguage(toLanguage);
+
+        using var audioInput = AudioConfig.FromWavFileInput(wavFilePath);
+        using var recognizer = new TranslationRecognizer(config, audioInput);
+
+        var result = await recognizer.RecognizeOnceAsync();
+        if (result.Reason == ResultReason.TranslatedSpeech)
+        {
+            return result.Translations[toLanguage];
+        }
+        else if (result.Reason == ResultReason.RecognizedSpeech)
+        {
+            return $"Recognized: {result.Text}. Translation failed.";
+        }
+        else
+        {
+            throw new Exception($"Speech translation failed. Reason: {result.Reason}");
         }
     }
 
