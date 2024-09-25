@@ -6,6 +6,11 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Net.Http.Headers;
+using Newtonsoft.Json;
+
+using System.Net.Http;
+using System.Text;
+using System.Threading.Tasks;
 
 [ApiController]
 [Route("api/[controller]")]
@@ -62,4 +67,59 @@ public class VoiceController : ControllerBase
         }
     }
 
+    [HttpPost("chat")]
+    public async Task<IActionResult> Chat([FromBody] UserMessage request)
+    {
+        // OpenAI API configuration
+        var openAiUrl = "https://api.openai.com/v1/chat/completions";
+        var openAiApiKey = _configuration["OpenAI:apiKey"];
+        // Prepare request body for OpenAI API
+        var openAiRequestBody = new
+            {
+                model = "gpt-4o-mini", // Replace with the correct model ID
+                messages = new[]
+                {
+                    new { role = "system", content = "You are a helpful assistant." },
+                    new { role = "user", content = request.Message }
+                }
+            };
+
+        var content = new StringContent(JsonConvert.SerializeObject(openAiRequestBody), Encoding.UTF8, "application/json");
+
+        // Add Authorization header
+        var client = _clientFactory.CreateClient();
+        client.DefaultRequestHeaders.Add("Authorization", $"Bearer {openAiApiKey}");
+
+        // Send request to OpenAI API
+        var response = await client.PostAsync(openAiUrl, content);
+        var responseBody = await response.Content.ReadAsStringAsync();
+
+        _logger.LogInformation("response is "+responseBody);
+        // Deserialize the response from OpenAI API
+        var openAiResponse = JsonConvert.DeserializeObject<OpenAiChatResponse>(responseBody);
+
+        // Return the response as JSON
+        return Ok(new { response = openAiResponse.Choices[0].Message.Content.Trim() });
+
+    }
+
+}
+
+
+public record UserMessage(string Message);
+
+public class OpenAiChatResponse
+{
+    public Choice[] Choices { get; set; }
+}
+
+public class Choice
+{
+    public Message Message { get; set; }
+}
+
+public class Message
+{
+    public string Role { get; set; }
+    public string Content { get; set; }
 }
