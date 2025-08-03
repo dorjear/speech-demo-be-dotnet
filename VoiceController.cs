@@ -103,6 +103,103 @@ public class VoiceController : ControllerBase
 
     }
 
+    [HttpPost("chatWithVoice")]
+    public async Task<IActionResult> ChatWithVoice([FromForm] IFormFile file)
+    {
+        if (file == null || file.Length == 0)
+        {
+            return BadRequest("File is not provided or empty.");
+        }
+
+        // Save uploaded webm to temp file
+        var tempWebmPath = Path.GetTempFileName() + ".webm";
+        var tempWavPath = Path.GetTempFileName() + ".wav";
+        try
+        {
+            using (var stream = new FileStream(tempWebmPath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream);
+            }
+
+            // Convert webm to wav using ffmpeg
+            var ffmpegPath = "ffmpeg"; // Assumes ffmpeg is in PATH
+            var ffmpegArgs = $"-y -i \"{tempWebmPath}\" -ar 16000 -ac 1 -f wav \"{tempWavPath}\"";
+            var process = new System.Diagnostics.Process
+            {
+                StartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = ffmpegPath,
+                    Arguments = ffmpegArgs,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                }
+            };
+            process.Start();
+            string ffmpegOutput = await process.StandardError.ReadToEndAsync();
+            process.WaitForExit();
+            if (process.ExitCode != 0)
+            {
+                _logger.LogError("FFmpeg conversion failed: " + ffmpegOutput);
+                return StatusCode(500, "Audio conversion failed.");
+            }
+
+            // Read wav and base64 encode
+            byte[] wavBytes = await System.IO.File.ReadAllBytesAsync(tempWavPath);
+            string wavBase64 = Convert.ToBase64String(wavBytes);
+
+            // Build OpenAI request
+            var openAiUrl = "https://api.openai.com/v1/chat/completions";
+            var openAiApiKey = _configuration["OpenAI:apiKey"];
+            var openAiRequestBody = new
+            {
+                model = "gpt-4o-audio-preview",
+                messages = new[]
+                {
+                    new
+                    {
+                        role = "user",
+                        content = new object[]
+                        {
+                            new { type = "text", text = "Please answer the query of this audio. No need to explain the input." },
+                            new
+                            {
+                                type = "input_audio",
+                                input_audio = new
+                                {
+                                    data = wavBase64,
+                                    format = "wav"
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            var content = new StringContent(JsonConvert.SerializeObject(openAiRequestBody), Encoding.UTF8, "application/json");
+            var client = _clientFactory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", openAiApiKey);
+
+            var response = await client.PostAsync(openAiUrl, content);
+            var responseBody = await response.Content.ReadAsStringAsync();
+
+            _logger.LogInformation("OpenAI response: " + responseBody);
+
+            return Ok(responseBody);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error in chatWithVoice");
+            return StatusCode(500, "Internal server error: " + ex.Message);
+        }
+        finally
+        {
+            // Clean up temp files
+            try { if (System.IO.File.Exists(tempWebmPath)) System.IO.File.Delete(tempWebmPath); } catch { }
+            try { if (System.IO.File.Exists(tempWavPath)) System.IO.File.Delete(tempWavPath); } catch { }
+        }
+    }
 }
 
 
