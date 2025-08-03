@@ -186,7 +186,11 @@ public class VoiceController : ControllerBase
 
             _logger.LogInformation("OpenAI response: " + responseBody);
 
-            return Ok(responseBody);
+            // Map OpenAI response to { text: ... }
+            var openAiResponse = JsonConvert.DeserializeObject<OpenAiChatResponse>(responseBody);
+            string text = openAiResponse?.Choices?[0]?.Message?.Content?.Trim() ?? "";
+
+            return Ok(new { text });
         }
         catch (Exception ex)
         {
